@@ -115,13 +115,13 @@ def source_state(pack):
 def changes(pack, manifest):
     state = source_state(pack)
     present = {n.lower(): n for n in pack.files()}
-    new, updated, removed, kept = [], [], [], []
+    new, updated, removed, kept, dropped = [], [], [], [], []
     listed = set()
     for item in manifest.files:
         low = item["filename"].lower()
         listed.add(low)
         if low not in present:
-            new.append(item)
+            (dropped if low in pack.dropped else new).append(item)
             continue
         current = engine.sha256(os.path.join(pack.path, present[low]))
         if current == item["sha256"]:
@@ -139,11 +139,62 @@ def changes(pack, manifest):
             continue
         if engine.sha256(os.path.join(pack.path, present[low])) == recorded:
             removed.append(present[low])
-    return {"new": new, "updated": updated, "removed": removed, "kept": kept}
+    return {"new": new, "updated": updated, "removed": removed, "kept": kept,
+            "dropped": [item["filename"] for item in dropped]}
 
 
 def count(found):
     return len(found["new"]) + len(found["updated"]) + len(found["removed"])
+
+
+def _title(info, file_name):
+    if info and info["name"]:
+        return info["name"]
+    return file_name[:-4] if engine.is_dll(file_name) else file_name
+
+
+def preview(pack, found):
+    present = {n.lower(): n for n in pack.files()}
+
+    def held(name):
+        file_name = present.get(name.lower(), name)
+        info = engine.mod_info(os.path.join(pack.path, file_name))
+        if not info or not info["name"]:
+            return file_name
+        text = info["name"] + (" " + info["version"] if info["version"] else "")
+        if _title(None, file_name).lower() != info["name"].lower():
+            text += " (%s)" % file_name
+        return text
+
+    lines = []
+    for label, names in (("New", [item["filename"] for item in found["new"]]),
+                         ("Updated", [held(item["filename"]) for item in found["updated"]]),
+                         ("Removed", [held(name) for name in found["removed"]]),
+                         ("Removed by you, not downloaded", found.get("dropped") or [])):
+        if names:
+            lines.append("%s: %s" % (label, ", ".join(names)))
+    return lines
+
+
+def summary(found):
+    info = found.get("info") or {}
+    parts = []
+    for item in found["updated"]:
+        old, new = info.get(item["filename"].lower(), (None, None))
+        before = old["version"] if old else ""
+        after = new["version"] if new else ""
+        text = "updated " + _title(new or old, item["filename"])
+        if before and after and before != after:
+            text += " %s to %s" % (before, after)
+        elif after:
+            text += " " + after
+        parts.append(text)
+    for item in found["new"]:
+        new = info.get(item["filename"].lower(), (None, None))[1]
+        parts.append("new " + _title(new, item["filename"]) + (" " + new["version"] if new and new["version"] else ""))
+    for name in found["removed"]:
+        parts.append("removed " + _title(info.get(name.lower(), (None, None))[0], name))
+    return ", ".join(parts) or "up to date"
 
 
 def describe(found):
@@ -197,6 +248,14 @@ def sync(game_dir, pack, manifest, fetcher=None):
             _download(item, os.path.join(work, item["filename"]), game_dir, fetcher)
         state = source_state(pack)
         present = {n.lower(): n for n in pack.files()}
+        info = {}
+        for item in found["new"] + found["updated"]:
+            low = item["filename"].lower()
+            old = engine.mod_info(os.path.join(pack.path, present[low])) if low in present else None
+            info[low] = (old, engine.mod_info(os.path.join(work, item["filename"])))
+        for name in found["removed"]:
+            info[name.lower()] = (engine.mod_info(os.path.join(pack.path, name)), None)
+        found["info"] = info
         seen = list(state["seen"])
         for item in found["updated"]:
             old = os.path.join(pack.path, present[item["filename"].lower()])

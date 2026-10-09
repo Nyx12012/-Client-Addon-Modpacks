@@ -175,6 +175,8 @@ class Pack:
         self.off = {n.lower() for n in _list(data.get("off")) if isinstance(n, str)}
         self.on = {n.lower() for n in _list(data.get("on")) if isinstance(n, str)}
         self.source = data.get("source") if isinstance(data.get("source"), dict) else {}
+        dropped = data.get("dropped") if isinstance(data.get("dropped"), dict) else {}
+        self.dropped = {k.lower(): str(v).upper() for k, v in dropped.items() if isinstance(k, str)}
 
     def files(self):
         try:
@@ -228,6 +230,8 @@ class Pack:
                  "off": sorted(self.off), "on": sorted(self.on)}
         if self.source:
             state["source"] = self.source
+        if self.dropped:
+            state["dropped"] = dict(sorted(self.dropped.items()))
         return state
 
     def link_host(self):
@@ -439,7 +443,7 @@ def unique_path(folder, name):
     return path
 
 
-def pack_hashes(game_dir):
+def file_hashes(game_dir):
     found = set()
     for pack in list_packs(game_dir):
         for name in pack.files():
@@ -447,7 +451,14 @@ def pack_hashes(game_dir):
                 found.add(sha256(os.path.join(pack.path, name)))
             except OSError:
                 pass
+    return found
+
+
+def pack_hashes(game_dir):
+    found = file_hashes(game_dir)
+    for pack in list_packs(game_dir):
         found.update(str(s).upper() for s in _list(pack.source.get("seen")))
+        found.update(v for v in pack.dropped.values() if v)
     return found
 
 
@@ -743,6 +754,7 @@ def add_files(pack, paths):
             continue
         added.append(name)
         pack.on.discard(name.lower())
+        pack.dropped.pop(name.lower(), None)
     pack.save()
     return added, refused
 
@@ -780,59 +792,232 @@ def move_loose(game_dir, names, pack):
             raise
         raise ModpacksError("%s couldn't be moved (%s). If the game is open, close it and try again."
                             % (os.path.basename(error.filename or "") or "A mod", _why(error)))
-    return [os.path.basename(source) for source, _ in moved]
+    names = [os.path.basename(source) for source, _ in moved]
+    if any(n.lower() in pack.dropped for n in names):
+        _remember(pack, {n.lower(): None for n in names})
+    return names
 
 
-def unpack(game_dir, pack, ledger_path=None):
-    if game_running(game_dir):
+def _remember(pack, changes):
+    if not os.path.isdir(pack.path):
+        return
+    fresh = Pack(pack.path)
+    for low, digest in changes.items():
+        for target in (fresh, pack):
+            if digest is None:
+                target.dropped.pop(low, None)
+            else:
+                target.dropped[low] = digest
+    fresh.save()
+
+
+def _write_rows(path, mods_dir, rows):
+    ledger = read_ledger(path)
+    ledger[ledger_key(mods_dir)] = [dict(e) for e in rows.values()]
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    write_json(path, ledger)
+
+
+def _closed(game_dir, running):
+    if (running or game_running)(game_dir):
         raise ModpacksError("Close the game first. It's holding the mods open.")
+
+
+def _to_loose(plan, path, rows, pack, name, held):
+    low = name.lower()
+    source = os.path.join(pack.path, name)
+    target = os.path.join(plan.mods_dir, name)
+    digest = sha256(source)
+    entry = rows.get(low)
+    if entry is not None and entry["sha256"].upper() == digest:
+        rows.pop(low)
+        _write_rows(path, plan.mods_dir, rows)
+        try:
+            os.remove(source)
+        except OSError:
+            rows[low] = entry
+            _write_rows(path, plan.mods_dir, rows)
+            raise
+        return digest
+    if entry is not None:
+        old = os.path.join(plan.mods_dir, entry["file"])
+        if entry["sha256"].upper() in held:
+            os.remove(old)
+        else:
+            recycle(old)
+        rows.pop(low)
+        _write_rows(path, plan.mods_dir, rows)
+    elif low in plan.loose:
+        if sha256(os.path.join(plan.mods_dir, plan.loose[low])) != digest:
+            raise ModpacksError("Mods already has a different %s" % name)
+        os.remove(source)
+        return digest
+    os.rename(source, target)
+    return digest
+
+
+def unpack(game_dir, pack, ledger_path=None, names=None, running=None):
+    _closed(game_dir, running)
     path = ledger_path or ledger_file()
     plan = Plan(game_dir, None, path)
-    mods_dir = plan.mods_dir
-    steps, refused, release = [], [], set()
+    rows = dict(plan.managed)
+    held = file_hashes(game_dir)
+    picked = None if names is None else {n.lower() for n in names}
+    moved, refused, dropped = [], [], {}
     for name in pack.files():
-        low = name.lower()
-        source = os.path.join(pack.path, name)
+        if picked is not None and name.lower() not in picked:
+            continue
         if is_launcher_mod(name):
             refused.append("%s (the launcher manages it)" % name)
             continue
-        digest = sha256(source)
-        if low in plan.managed:
-            if plan.managed[low]["sha256"].upper() == digest:
-                release.add(low)
-                steps.append((name, source, None))
-            else:
-                refused.append("%s (start the game once first, then try again)" % name)
-            continue
-        if low in plan.loose:
-            if sha256(os.path.join(mods_dir, plan.loose[low])) == digest:
-                steps.append((name, source, None))
-            else:
-                refused.append("%s (Mods already has a different %s)" % (name, name))
-            continue
-        steps.append((name, source, os.path.join(mods_dir, name)))
-    if release:
-        key = ledger_key(mods_dir)
-        ledger = dict(plan.ledger)
-        ledger[key] = [dict(e) for low, e in plan.managed.items() if low not in release]
-        write_json(path, ledger)
-    moved = []
-    for name, source, target in steps:
         try:
-            if target is None:
-                os.remove(source)
-            else:
-                os.rename(source, target)
-            moved.append(name)
+            digest = _to_loose(plan, path, rows, pack, name, held)
+        except ModpacksError as error:
+            refused.append("%s (%s)" % (name, error))
+            continue
         except OSError as error:
             refused.append("%s (%s)" % (name, _why(error)))
-    if not pack.files():
+            continue
+        moved.append(name)
+        dropped[name.lower()] = digest
+    if names is None and not pack.files():
         try:
             os.remove(os.path.join(pack.path, PACK_FILE))
             os.rmdir(pack.path)
         except OSError:
             pass
+    elif dropped and pack.link_host():
+        _remember(pack, dropped)
     return moved, refused
+
+
+def other_copies(game_dir, pack, name):
+    low = name.lower()
+    try:
+        mine = sha256(os.path.join(pack.path, name))
+    except OSError:
+        mine = None
+    found = []
+    for other in list_packs(game_dir):
+        if same_path(other.path, pack.path):
+            continue
+        for file_name in other.files():
+            if file_name.lower() != low:
+                continue
+            try:
+                same = sha256(os.path.join(other.path, file_name)) == mine
+            except OSError:
+                same = False
+            found.append((other, file_name, same))
+    return found
+
+
+def delete_mods(game_dir, targets, ledger_path=None, running=None):
+    deleted, notes = [], []
+    for pack, name in targets:
+        path = os.path.join(pack.path, name)
+        try:
+            digest = sha256(path)
+            recycle(path)
+        except OSError as error:
+            notes.append("%s in %s wasn't deleted (%s)" % (name, pack.name, _why(error)))
+            continue
+        deleted.append(name)
+        try:
+            _remember(pack, {name.lower(): digest})
+        except OSError as error:
+            notes.append("%s couldn't note that %s is gone (%s)" % (pack.name, name, _why(error)))
+    names = {n.lower() for n in deleted if not is_launcher_mod(n)}
+    if not names:
+        return deleted, notes, [], []
+    cleared, left = _clear_copies(game_dir, names, ledger_path or ledger_file(),
+                                  (running or game_running)(game_dir))
+    return deleted, notes, cleared, left
+
+
+def _clear_copies(game_dir, names, path, running):
+    plan = Plan(game_dir, None, path)
+    held = file_hashes(game_dir)
+    rows = dict(plan.managed)
+    cleared, left = [], []
+    for low in sorted(names):
+        entry = rows.get(low)
+        if entry is None or entry["sha256"].upper() in held:
+            continue
+        if not running:
+            try:
+                recycle(os.path.join(plan.mods_dir, entry["file"]))
+                rows.pop(low)
+                cleared.append(entry["file"])
+                continue
+            except OSError:
+                pass
+        left.append(entry["file"])
+    if cleared:
+        _write_rows(path, plan.mods_dir, rows)
+    return cleared, left
+
+
+def delete_loose(game_dir, name, ledger_path=None, running=None):
+    if is_launcher_mod(name):
+        raise ModpacksError("%s belongs to the launcher, so Modpacks leaves it alone." % name)
+    _closed(game_dir, running)
+    plan = Plan(game_dir, None, ledger_path or ledger_file())
+    found = plan.loose.get(name.lower())
+    if found is None:
+        raise ModpacksError("%s isn't a loose mod anymore. Click Refresh." % name)
+    recycle(os.path.join(plan.mods_dir, found))
+    return found
+
+
+def add_loose(game_dir, paths, ask=None, ledger_path=None, running=None):
+    _closed(game_dir, running)
+    plan = Plan(game_dir, None, ledger_path or ledger_file())
+    added, replaced, same, refused = [], [], [], []
+    for source in paths:
+        name = os.path.basename(source)
+        low = name.lower()
+        if not is_dll(name):
+            refused.append("%s (not a .dll)" % name)
+            continue
+        if is_launcher_mod(name):
+            refused.append("%s (the launcher installs it)" % name)
+            continue
+        if low in plan.managed:
+            refused.append("%s (pack %s put that file in Mods, use Move to loose in that pack instead)"
+                           % (name, plan.managed[low].get("pack") or "?"))
+            continue
+        temp = None
+        try:
+            digest = sha256(source)
+            old = plan.loose.get(low)
+            if old is not None:
+                live = os.path.join(plan.mods_dir, old)
+                if same_path(source, live) or sha256(live) == digest:
+                    same.append(name)
+                    continue
+                if ask is None or not ask(name):
+                    refused.append("%s (kept the one already in Mods)" % name)
+                    continue
+            temp = os.path.join(plan.mods_dir, name + TEMP_SUFFIX)
+            shutil.copyfile(source, temp)
+            if sha256(temp) != digest:
+                raise OSError(5, "the file changed while it was being copied", source)
+            if old is not None:
+                recycle(live)
+            os.replace(temp, os.path.join(plan.mods_dir, name))
+            temp = None
+            (added if old is None else replaced).append(name)
+            plan.loose[low] = name
+        except OSError as error:
+            refused.append("%s (%s)" % (name, _why(error)))
+        finally:
+            if temp is not None:
+                try:
+                    os.remove(temp)
+                except OSError:
+                    pass
+    return added, replaced, same, refused
 
 
 def export_pack(pack, zip_path):

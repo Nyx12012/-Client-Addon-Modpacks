@@ -177,17 +177,20 @@ def _startup_check(root):
 def _checked(root, game_dir, report, error):
     if error or not report:
         return
-    waiting = []
+    waiting, blocks = [], []
     for name, manifest, found, problem in report:
         if problem:
             _log("Modpacks: couldn't check %s for updates (%s)" % (name, problem), "warn")
         elif source.count(found):
             waiting.append("%s: %s" % (name, source.describe(found)))
+            pack = engine.find_pack(game_dir, name)
+            lines = source.preview(pack, found) if pack is not None else [source.describe(found)]
+            blocks.append(name + "\n" + "\n".join("    " + line for line in lines))
     if not waiting:
         if not any(r[3] for r in report):
             _log("Modpacks: linked packs are up to date", "dim")
         return
-    if not messagebox.askyesno("Modpack updates", "Updates are ready:\n\n" + "\n".join(waiting)
+    if not messagebox.askyesno("Modpack updates", "Updates are ready:\n\n" + "\n\n".join(blocks)
                                + "\n\nDownload them now?", parent=root):
         _log("Modpacks: updates skipped for now (" + "; ".join(waiting) + ")", "warn")
         return
@@ -202,7 +205,7 @@ def _updated(root, done, error):
         if problem:
             _log("Modpacks: %s wasn't updated (%s)" % (name, problem), "err")
         else:
-            _log("Modpacks: updated %s (%s)" % (name, source.describe(found)), "ok")
+            _log("Modpacks: %s: %s" % (name, source.summary(found)), "ok")
     window_open = getattr(root, "_modpacks_window", None)
     try:
         if window_open is not None and window_open.winfo_exists():

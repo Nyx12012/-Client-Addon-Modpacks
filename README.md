@@ -13,7 +13,8 @@ Click **📦 Modpacks** next to 🧪 Mods on the main window.
 - Several packs can be on at once. Untick a mod to leave it out of its pack without removing it.
 - When the game starts, Modpacks copies the mods of every pack that's on for that server into `Mods`,
   and takes out the ones it put there before that aren't wanted now.
-- Loose mods in `Mods` are yours. They always load and Modpacks never touches them.
+- Loose mods in `Mods` are yours. They always load, and Modpacks only changes them when you click a button.
+- While a pack is on, its mods sit in `Mods` next to your loose mods. The window's loose list shows only yours.
 - A Main Menu launch loads only the packs that are On everywhere.
 - The launcher log says which packs loaded, like `Modpacks: QoL, Velaris (12 mods)`.
 
@@ -23,8 +24,11 @@ Click **📦 Modpacks** next to 🧪 Mods on the main window.
 - **The selected pack:** its mode, its servers, its mods with their real names, Open folder,
   Add files..., Export zip.
 - **Next launch:** exactly what will load for the server in the IP box. Problems show in red.
-- **Loose mods:** what's loose in `Mods`. **Make a pack from these...** moves the mods you pick into a
-  pack. New packs start On everywhere, so nothing changes until you change the mode.
+- **Each mod in a pack:** **Move to loose** takes it out of the pack and makes it a loose mod. **Delete** sends
+  it to the Recycle Bin. If the same mod is in other packs, you can delete it there too in the same step.
+- **Loose mods:** what's loose in `Mods`. Each one has **Add to pack...** and **Delete**.
+  **Add loose mods...** copies the DLLs you pick into `Mods`. **Make a pack from these...** moves the mods
+  you pick into a pack. New packs start On everywhere, so nothing changes until you change the mode.
 
 ## Packs from a link
 
@@ -36,6 +40,8 @@ that downloads those mods and keeps them up to date.
 - When the launcher opens, Modpacks checks every linked pack and asks before downloading anything.
 - Every file must come over https from the same site as the list and match its SHA-256, or nothing changes.
 - Mods you add to a linked pack yourself, or files you change, are never overwritten.
+- A mod you delete or move out of a linked pack isn't downloaded again. Add it back with **Add files...**.
+- Updates name every mod, like `updated DyeingAPI 1.0.0 to 1.1.0, new NightSkeletons 1.0.0`.
 - **Check now** and **Remove link** are on the pack. If you used a separate updater addon for the same mods,
   turn it off so the mods aren't installed twice.
 
@@ -58,7 +64,10 @@ A list is JSON in this shape. `name` and `servers` are optional:
   says what's wrong, and nothing in `Mods` is changed.
 - If the game is already running, nothing changes and the launch goes ahead as usual.
 - If a file can't be changed, everything is put back the way it was and the launch stops.
-- A mod that no pack holds anymore is never deleted. It's kept in `Modpacks\_removed`.
+- A mod that no pack holds anymore is never deleted. It's kept in `Modpacks\_removed`. Mods you delete
+  yourself go to the Recycle Bin, along with their copy in `Mods`.
+- Moving mods and adding or deleting loose mods need the game closed, because it holds the mods open.
+  Deleting a mod from a pack works anytime. Its copy leaves `Mods` the next time the game starts.
 - Config files and `UserData` are shared by all packs.
 - TavernEssentials and Circuit's Voice Chat belong to the launcher, so they never go in a pack.
 - Export leaves out your mode and servers. An imported pack starts Off, and mods named

@@ -13,7 +13,7 @@ from . import engine, source
 TITLE = "Modpacks"
 MODE_LABELS = (("off", "Off"), ("all", "On everywhere"), ("servers", "Only on these servers"))
 LIST_HEIGHT = 150
-WIDE = 880
+WIDE = 920
 
 
 def _launcher_servers():
@@ -159,6 +159,9 @@ class ModpacksWindow(tk.Toplevel):
     def _small(self, parent, text, cmd, style="normal"):
         return _theme._btn(parent, text, cmd, style, font=("Segoe UI", 8), pady=3, padx=8)
 
+    def _tiny(self, parent, text, cmd, style="normal"):
+        return _theme._btn(parent, text, cmd, style, font=("Segoe UI", 8), pady=1, padx=6)
+
     def _build(self):
         t = _theme
         header = tk.Frame(self, bg=t.SURF, height=44)
@@ -170,8 +173,9 @@ class ModpacksWindow(tk.Toplevel):
         tk.Frame(self, bg=t.BORDER, height=1).pack(fill="x")
         tk.Label(self, text=(
             "A pack is a folder of mods. Turn each pack Off, On everywhere, or on only the servers you "
-            "pick. Several packs can be on at once. Loose mods in the Mods folder always load and are never "
-            "touched. Changes apply when the game starts."),
+            "pick. Several packs can be on at once. When the game starts, the mods of the packs that are on "
+            "are copied into the Mods folder next to your loose mods. The loose list below shows only yours, "
+            "and they always load."),
             bg=t.BG, fg=t.MUTED, font=("Segoe UI", 9), wraplength=WIDE - 40, justify="left"
         ).pack(anchor="w", padx=20, pady=(10, 2))
         tk.Label(self, text=os.path.join(self.game_dir, engine.PACKS_DIR), bg=t.BG, fg=t.MUTED,
@@ -249,7 +253,7 @@ class ModpacksWindow(tk.Toplevel):
         bottom.pack(fill="both", padx=16, pady=(10, 0))
         launch = tk.Frame(bottom, bg=t.BG)
         launch.pack(side="left", fill="both", expand=True)
-        loose = tk.Frame(bottom, bg=t.BG, width=330)
+        loose = tk.Frame(bottom, bg=t.BG, width=370)
         loose.pack(side="left", fill="y", padx=(12, 0))
         loose.pack_propagate(False)
         self.launch_title = tk.Label(launch, text="NEXT LAUNCH", bg=t.BG, fg=t.AMBER,
@@ -261,8 +265,11 @@ class ModpacksWindow(tk.Toplevel):
                  font=("Georgia", 9, "bold")).pack(anchor="w", pady=(0, 4))
         self.loose_list = ScrollList(loose, LIST_HEIGHT - 28)
         self.loose_list.pack(fill="both", expand=True)
-        self.make_btn = self._small(loose, "Make a pack from these...", self.make_from_loose, "primary")
-        self.make_btn.pack(anchor="w", pady=(4, 0))
+        loose_row = tk.Frame(loose, bg=t.BG)
+        loose_row.pack(anchor="w", pady=(4, 0))
+        self.make_btn = self._small(loose_row, "Make a pack from these...", self.make_from_loose, "primary")
+        self.make_btn.pack(side="left")
+        self._small(loose_row, "Add loose mods...", self.add_loose).pack(side="left", padx=(4, 0))
 
         self.status = tk.Label(self, text="", bg=t.BG, fg=t.CYAN, font=("Segoe UI", 9),
                                wraplength=WIDE - 40, justify="left", anchor="w")
@@ -432,6 +439,12 @@ class ModpacksWindow(tk.Toplevel):
             box.pack(side="left", anchor="n", pady=(2, 0))
             if launcher:
                 box.configure(state="disabled")
+            tools = tk.Frame(row, bg=t.SURF)
+            tools.pack(side="right", anchor="n", pady=(2, 0))
+            self._tiny(tools, "Delete", lambda n=name: self.mod_action(n, "delete"), "danger").pack(side="right")
+            if not launcher:
+                self._tiny(tools, "Move to loose", lambda n=name: self.mod_action(n, "move")).pack(
+                    side="right", padx=(0, 4))
             col = tk.Frame(row, bg=t.SURF)
             col.pack(side="left", fill="x", expand=True)
             line = tk.Frame(col, bg=t.SURF)
@@ -503,8 +516,14 @@ class ModpacksWindow(tk.Toplevel):
             title, detail = _mod_line(os.path.join(plan.mods_dir, name), name)
             launcher = engine.is_launcher_mod(name)
             text = title + "  (the launcher's)" if launcher else title + ("  " + detail if detail else "")
-            self._label(self.loose_list.inner, text, fg=t.MUTED if launcher else t.PARCH,
-                        font=("Segoe UI", 9)).pack(anchor="w", padx=10, pady=1)
+            row = tk.Frame(self.loose_list.inner, bg=t.SURF)
+            row.pack(fill="x", padx=(10, 6), pady=1)
+            if not launcher:
+                self._tiny(row, "Delete", lambda n=name: self.delete_loose(n), "danger").pack(side="right")
+                self._tiny(row, "Add to pack...", lambda n=name: self.make_from_loose(n)).pack(
+                    side="right", padx=(0, 4))
+            self._label(row, text, fg=t.MUTED if launcher else t.PARCH, font=("Segoe UI", 9)).pack(
+                side="left", fill="x")
         self.make_btn.configure(state="normal" if any(not engine.is_launcher_mod(n) for n in names) else "disabled")
 
     def save(self, pack, message=None):
@@ -680,11 +699,13 @@ class ModpacksWindow(tk.Toplevel):
             return
         found = source.changes(pack, manifest)
         notes = (" Not changed: " + ", ".join(found["kept"]) + ".") if found["kept"] else ""
+        if found["dropped"]:
+            notes += " Removed by you, not downloaded: " + ", ".join(found["dropped"]) + "."
         if not source.count(found):
             self.say("%s is up to date.%s" % (name, notes))
             return
-        if not messagebox.askyesno("Update %s" % name, "%s has updates: %s.\n\nDownload them now?"
-                                   % (name, source.describe(found)), parent=self):
+        if not messagebox.askyesno("Update %s" % name, "%s has updates:\n\n%s\n\nDownload them now?"
+                                   % (name, "\n".join(source.preview(pack, found))), parent=self):
             self.say("")
             return
         self.say("Updating %s..." % name)
@@ -696,7 +717,7 @@ class ModpacksWindow(tk.Toplevel):
             self.say(str(error), True)
             return
         self.refresh(select=name)
-        self.say("Updated %s: %s. It applies the next time the game starts." % (name, source.describe(found)))
+        self.say("Updated %s: %s. It applies the next time the game starts." % (name, source.summary(found)))
 
     def remove_link(self):
         pack = self.current()
@@ -784,8 +805,57 @@ class ModpacksWindow(tk.Toplevel):
             text += " Left out: " + ", ".join(skipped) + "."
         self.say(text)
 
-    def make_from_loose(self):
-        dialog = LooseDialog(self)
+    def mod_action(self, name, action):
+        pack = self.current()
+        if pack is None:
+            return
+        dialog = ModDialog(self, pack, name, action)
+        self.wait_window(dialog)
+        if dialog.result:
+            self.refresh(select=pack.name)
+            self.say(dialog.result)
+
+    def delete_loose(self, name):
+        title, detail = _mod_line(os.path.join(self.game_dir, "Mods", name), name)
+        if not messagebox.askyesno("Delete loose mod", "Move %s (%s) from the Mods folder to the Recycle Bin?"
+                                   % (title, name), parent=self):
+            return
+        try:
+            engine.delete_loose(self.game_dir, name)
+        except (engine.ModpacksError, OSError) as error:
+            self.say(getattr(error, "strerror", None) or str(error), True)
+            return
+        self.refresh()
+        self.say("%s is in the Recycle Bin." % name)
+
+    def add_loose(self):
+        paths = filedialog.askopenfilenames(parent=self, title="Add loose mods",
+                                            filetypes=[("Mods", "*.dll"), ("All files", "*.*")])
+        if not paths:
+            return
+
+        def ask(name):
+            return messagebox.askyesno("Replace %s" % name, "Mods already has a different %s.\n\nReplace it? The "
+                                       "old one goes to the Recycle Bin." % name, parent=self)
+        try:
+            added, replaced, same, refused = engine.add_loose(self.game_dir, paths, ask)
+        except (engine.ModpacksError, OSError) as error:
+            self.say(getattr(error, "strerror", None) or str(error), True)
+            return
+        self.refresh()
+        parts = []
+        if added:
+            parts.append("Added %s to Mods." % ", ".join(added))
+        if replaced:
+            parts.append("Replaced %s. The old copy is in the Recycle Bin." % ", ".join(replaced))
+        if same:
+            parts.append("Already in Mods: %s." % ", ".join(same))
+        if refused:
+            parts.append("Not added: %s." % ", ".join(refused))
+        self.say(" ".join(parts), bool(refused) and not (added or replaced))
+
+    def make_from_loose(self, only=None):
+        dialog = LooseDialog(self, only)
         self.wait_window(dialog)
         if dialog.result:
             pack, moved, created = dialog.result
@@ -798,26 +868,130 @@ class ModpacksWindow(tk.Toplevel):
             self.say(text)
 
 
+class ModDialog(tk.Toplevel):
+    def __init__(self, owner, pack, name, action):
+        super().__init__(owner)
+        _chrome._start_hidden(self)
+        t = _theme
+        self.owner = owner
+        self.pack = pack
+        self.name = name
+        self.action = action
+        self.result = None
+        self.keep = []
+        moving = action == "move"
+        self.title("Move to loose" if moving else "Delete mod")
+        self.configure(bg=t.BG)
+        self.transient(owner)
+        title, detail = _mod_line(os.path.join(pack.path, name), name)
+        if moving:
+            text = ("Move %s (%s) out of %s into the Mods folder? It becomes a loose mod, so it always loads."
+                    % (title, name, pack.name))
+        else:
+            text = "Delete %s (%s) from %s? It goes to the Recycle Bin." % (title, name, pack.name)
+        if pack.link_host():
+            text += " %s updates from %s and won't download it again." % (pack.name, pack.link_host())
+        tk.Label(self, text=text, bg=t.BG, fg=t.PARCH, font=("Segoe UI", 9), wraplength=420,
+                 justify="left").pack(anchor="w", padx=16, pady=(12, 6))
+        self.others = engine.other_copies(owner.game_dir, pack, name)
+        self.vars = []
+        if self.others:
+            tk.Label(self, text="It's in other packs too. Tick the ones to delete it from as well:", bg=t.BG,
+                     fg=t.MUTED, font=("Segoe UI", 9), wraplength=420, justify="left"
+                     ).pack(anchor="w", padx=16, pady=(4, 4))
+            box = tk.Frame(self, bg=t.SURF, highlightbackground=t.BORDER, highlightthickness=1)
+            box.pack(fill="x", padx=16)
+            for other, file_name, same in self.others:
+                var = tk.BooleanVar(value=False)
+                self.keep.append(var)
+                self.vars.append(var)
+                tk.Checkbutton(box, text="%s  (%s)" % (other.name, "the same file" if same else "a different version"),
+                               variable=var, bg=t.SURF, fg=t.PARCH, activebackground=t.SURF,
+                               activeforeground=t.AMBER, selectcolor=t.AMBERDIM, font=("Segoe UI", 9),
+                               highlightthickness=0, bd=0, anchor="w").pack(anchor="w", padx=8, pady=2)
+        self.error = tk.Label(self, text="", bg=t.BG, fg=t.RED, font=("Segoe UI", 9), wraplength=420,
+                              justify="left")
+        self.error.pack(anchor="w", padx=16, pady=(6, 0))
+        row = tk.Frame(self, bg=t.BG)
+        row.pack(fill="x", padx=16, pady=(6, 14))
+        _theme._btn(row, "Move to loose" if moving else "Delete", self.run, "primary" if moving else "danger",
+                    font=("Georgia", 10, "bold"), pady=6, padx=14).pack(side="left")
+        _theme._btn(row, "Cancel", self.destroy, font=("Segoe UI", 9), pady=6, padx=10).pack(side="left", padx=6)
+        self.update_idletasks()
+        self.geometry("460x%d" % self.winfo_reqheight())
+        _chrome._finish_dark_window(self)
+        self.grab_set()
+
+    def run(self):
+        game_dir = self.owner.game_dir
+        others = [(other, file_name) for (other, file_name, same), var in zip(self.others, self.vars) if var.get()]
+        try:
+            if self.action == "move":
+                moved, refused = engine.unpack(game_dir, self.pack, names=[self.name])
+                if not moved:
+                    raise engine.ModpacksError("Not moved: " + ", ".join(refused) + ".")
+                text = "Moved %s out of %s. It's a loose mod now." % (self.name, self.pack.name)
+                deleted, notes, cleared, left = engine.delete_mods(game_dir, others)
+            else:
+                deleted, notes, cleared, left = engine.delete_mods(game_dir, [(self.pack, self.name)])
+                if not deleted:
+                    raise engine.ModpacksError(" ".join(notes))
+                more = engine.delete_mods(game_dir, others)
+                deleted += more[0]
+                notes += more[1]
+                cleared += more[2]
+                left = [n for n in left + more[3] if n not in more[2]]
+                text = "Deleted %s from %s." % (self.name, self.pack.name)
+        except (engine.ModpacksError, OSError) as error:
+            self.error.configure(text=getattr(error, "strerror", None) or str(error))
+            return
+        if self.action == "move" and deleted:
+            text += " Deleted it from %d other pack%s." % (len(deleted), "" if len(deleted) == 1 else "s")
+        elif len(deleted) > 1:
+            text = "Deleted %s from %s and %d other pack%s." % (self.name, self.pack.name, len(deleted) - 1,
+                                                                 "" if len(deleted) == 2 else "s")
+        if deleted:
+            text += " Deleted files are in the Recycle Bin."
+        if cleared:
+            text += " Its copy in Mods went there too."
+        if left:
+            text += " Its copy stays in Mods until the game closes and leaves at the next start."
+        if notes:
+            text += " " + "; ".join(notes) + "."
+        self.result = text
+        self.destroy()
+
+
 class LooseDialog(tk.Toplevel):
-    def __init__(self, owner):
+    def __init__(self, owner, only=None):
         super().__init__(owner)
         _chrome._start_hidden(self)
         t = _theme
         self.owner = owner
         self.result = None
         self.keep = []
-        self.title("Make a pack from loose mods")
+        self.title("Add %s to a pack" % only if only else "Make a pack from loose mods")
         self.configure(bg=t.BG)
         self.transient(owner)
         plan = engine.Plan(owner.game_dir, None)
-        self.names = [n for n in sorted(plan.loose.values(), key=str.lower) if not engine.is_launcher_mod(n)]
-        tk.Label(self, text="Pick the loose mods to move into a pack. They leave the Mods folder and live in "
-                 "the pack from now on. Nothing else moves.", bg=t.BG, fg=t.MUTED, font=("Segoe UI", 9),
-                 wraplength=440, justify="left").pack(anchor="w", padx=16, pady=(12, 6))
-        self.list = ScrollList(self, min(260, max(60, 24 * len(self.names) + 8)))
-        self.list.pack(fill="both", expand=True, padx=16)
+        self.names = [only] if only else [n for n in sorted(plan.loose.values(), key=str.lower)
+                                          if not engine.is_launcher_mod(n)]
         self.vars = {}
-        for name in self.names:
+        if only:
+            title, detail = _mod_line(os.path.join(plan.mods_dir, only), only)
+            tk.Label(self, text="Move %s (%s) out of the Mods folder into a pack. It loads whenever that pack is on."
+                     % (title, only), bg=t.BG, fg=t.PARCH, font=("Segoe UI", 9), wraplength=440,
+                     justify="left").pack(anchor="w", padx=16, pady=(12, 6))
+            self.vars[only] = tk.BooleanVar(value=True)
+            self.keep.append(self.vars[only])
+        else:
+            tk.Label(self, text="Pick the loose mods to move into a pack. They leave the Mods folder and live in "
+                     "the pack from now on. Nothing else moves.", bg=t.BG, fg=t.MUTED, font=("Segoe UI", 9),
+                     wraplength=440, justify="left").pack(anchor="w", padx=16, pady=(12, 6))
+            self.list = ScrollList(self, min(260, max(60, 24 * len(self.names) + 8)))
+            self.list.pack(fill="both", expand=True, padx=16)
+            self.bind("<MouseWheel>", lambda e: self.list.wheel(e))
+        for name in ([] if only else self.names):
             title, detail = _mod_line(os.path.join(plan.mods_dir, name), name)
             var = tk.BooleanVar(value=False)
             self.keep.append(var)
@@ -828,7 +1002,7 @@ class LooseDialog(tk.Toplevel):
                            ).pack(anchor="w", padx=8, pady=1)
         target = tk.Frame(self, bg=t.BG)
         target.pack(fill="x", padx=16, pady=(8, 0))
-        self.choice = tk.StringVar(value="new")
+        self.choice = tk.StringVar(value="old" if only and owner.packs else "new")
         self.keep.append(self.choice)
         tk.Radiobutton(target, text="New pack named", value="new", variable=self.choice, bg=t.BG, fg=t.PARCH,
                        activebackground=t.BG, selectcolor=t.AMBERDIM, font=("Segoe UI", 9),
@@ -837,7 +1011,7 @@ class LooseDialog(tk.Toplevel):
         tk.Entry(target, textvariable=self.new_name, bg=t.SURF, fg=t.PARCH, insertbackground=t.AMBER,
                  relief="flat", font=("Segoe UI", 9), bd=4).grid(row=0, column=1, sticky="we", padx=(6, 0))
         packs = [p.name for p in owner.packs]
-        self.existing = tk.StringVar(value=packs[0] if packs else "")
+        self.existing = tk.StringVar(value=owner.selected if owner.selected in packs else packs[0] if packs else "")
         if packs:
             tk.Radiobutton(target, text="Existing pack", value="old", variable=self.choice, bg=t.BG, fg=t.PARCH,
                            activebackground=t.BG, selectcolor=t.AMBERDIM, font=("Segoe UI", 9),
@@ -854,7 +1028,6 @@ class LooseDialog(tk.Toplevel):
         _theme._btn(row, "Move into pack", self.move, "primary", font=("Georgia", 10, "bold"),
                     pady=6, padx=14).pack(side="left")
         _theme._btn(row, "Cancel", self.destroy, font=("Segoe UI", 9), pady=6, padx=10).pack(side="left", padx=6)
-        self.bind("<MouseWheel>", lambda e: self.list.wheel(e))
         self.update_idletasks()
         self.geometry("480x%d" % self.winfo_reqheight())
         _chrome._finish_dark_window(self)

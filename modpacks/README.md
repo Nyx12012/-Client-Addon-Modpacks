@@ -61,11 +61,13 @@ A list is JSON in this shape. `name` and `servers` are optional:
 ## Good to know
 
 - If two packs have different files with the same name, a pack mod is also loose in `Mods` as a
-  different file, or the same mod would load twice, Modpacks asks what to do before the game starts:
-  - **Remove and play** sends the loose files in the way to the Recycle Bin, then starts the game.
+  different file, or the same mod would load twice, Modpacks asks what to do before the game starts.
+  You don't need to delete anything yourself:
+  - **Remove and play** plays with the pack's copy and sends the extra copy in `Mods` to the Recycle Bin.
     It only shows when a loose file is part of the problem.
-  - **Run anyway** starts the game without the clashing pack mods, this time only. Your loose mods stay.
-  - **Close** stops the launch and changes nothing.
+  - **Run anyway** plays without the pack's copies this time, so a copy already in `Mods` is the one that
+    loads. Nothing is deleted.
+  - **Close** doesn't start the game and changes nothing.
 - If the game is already running, nothing changes and the launch goes ahead as usual.
 - If a file can't be changed, everything is put back the way it was and the launch stops.
 - A mod that no pack holds anymore is never deleted. It's kept in `Modpacks\_removed`. Mods you delete

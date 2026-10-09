@@ -1099,20 +1099,24 @@ class ConflictDialog(tk.Toplevel):
                 self.transient(owner)
         except Exception:
             pass
-        tk.Label(self, text="These mods clash, so the game can't start with all of them:", bg=t.BG, fg=t.PARCH,
-                 font=("Segoe UI", 10, "bold"), wraplength=480, justify="left").pack(anchor="w", padx=16, pady=(12, 6))
+        tk.Label(self, text="Some mods are here twice. The game can only load one copy of each:", bg=t.BG,
+                 fg=t.PARCH, font=("Segoe UI", 10, "bold"), wraplength=480, justify="left").pack(
+            anchor="w", padx=16, pady=(12, 6))
         box = tk.Frame(self, bg=t.SURF, highlightbackground=t.BORDER, highlightthickness=1)
         box.pack(fill="x", padx=16)
         for conflict in conflicts:
-            tk.Label(box, text="✖ " + conflict, bg=t.SURF, fg=t.RED, font=("Segoe UI", 9), wraplength=460,
+            tk.Label(box, text="• " + conflict, bg=t.SURF, fg=t.AMBER, font=("Segoe UI", 9), wraplength=460,
                      justify="left", anchor="w").pack(anchor="w", padx=8, pady=3)
+        tk.Label(self, text="You don't need to delete anything yourself. Pick one:", bg=t.BG, fg=t.PARCH,
+                 font=("Segoe UI", 9), wraplength=480, justify="left").pack(anchor="w", padx=16, pady=(10, 0))
         steps = []
         if loose:
-            steps.append(("Remove and play", "Moves %s from the Mods folder to the Recycle Bin, then starts the game "
-                          "with your packs." % engine.listed(loose)))
-        steps.append(("Run anyway", "Starts the game without the clashing pack mods, this time only. Your loose "
-                      "mods stay as they are."))
-        steps.append(("Close", "Stops here. Nothing changes."))
+            steps.append(("Remove and play", "Plays with the pack's copy. The extra %s in your Mods folder %s to the "
+                          "Recycle Bin." % (engine.listed(loose), "goes" if len(loose) == 1 else "go")))
+            steps.append(("Run anyway", "Plays with the copy in your Mods folder this time. Nothing is deleted."))
+        else:
+            steps.append(("Run anyway", "Plays without these mods this time. Nothing is deleted."))
+        steps.append(("Close", "Doesn't start the game. Nothing changes."))
         for name, text in steps:
             row = tk.Frame(self, bg=t.BG)
             row.pack(fill="x", padx=16, pady=(8, 0))

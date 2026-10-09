@@ -54,18 +54,49 @@ def _is_game(args):
     return bool(exe) and engine.same_path(first, exe)
 
 
+def ask_conflict(conflicts, loose):
+    dialog = window.ConflictDialog(_app(), conflicts, loose)
+    dialog.wait_window()
+    return dialog.choice
+
+
+def _apply(game_dir, target):
+    leave_out = None
+    removed = False
+    while True:
+        try:
+            return engine.apply(game_dir, target, leave_out=leave_out)
+        except engine.ConflictError as error:
+            loose = [] if removed else engine.loose_in(error.conflicts)
+            choice = None
+            if leave_out is None and threading.current_thread() is threading.main_thread():
+                try:
+                    choice = ask_conflict(error.conflicts, loose)
+                except Exception:
+                    choice = None
+            if choice is None:
+                _alert("Modpacks", "The game can't start with these mods together:\n\n"
+                       + "\n".join("• " + c for c in error.conflicts)
+                       + "\n\nOpen Modpacks to fix it, then join again.")
+            if choice == "remove" and loose:
+                for name in engine.remove_loose(game_dir, loose):
+                    _log("Modpacks: %s went to the Recycle Bin" % name, "warn")
+                removed = True
+            elif choice == "run":
+                leave_out = engine.left_out(error.conflicts)
+            else:
+                raise
+
+
 def before_launch(args):
     if not _is_game(args):
         return
     game_dir = os.path.dirname(os.path.abspath(os.fspath(args[0])))
     target = engine.target_from_args(list(args))
     try:
-        result = engine.apply(game_dir, target)
+        result = _apply(game_dir, target)
     except engine.ConflictError as error:
-        _alert("Modpacks", "The game can't start with these mods together:\n\n"
-               + "\n".join("• " + c for c in error.conflicts)
-               + "\n\nOpen Modpacks to fix it, then join again.")
-        raise engine.ModpacksError("Modpacks found a conflict, so nothing was changed. "
+        raise engine.ModpacksError("Modpacks found a conflict, so the game didn't start. "
                                    + "; ".join(error.conflicts)) from None
     except engine.ModpacksError as error:
         _alert("Modpacks", str(error))
@@ -87,6 +118,8 @@ def before_launch(args):
              % (os.path.basename(path), os.path.join(engine.PACKS_DIR, engine.REMOVED_DIR)), "warn")
     for warning in result.warnings:
         _log("Modpacks: " + warning, "warn")
+    if result.plan.left_out:
+        _log("Modpacks: left out for this launch: " + engine.describe_left_out(result.plan.left_out), "warn")
     _log(result.plan.summary(), "info")
     window_open = getattr(_app(), "_modpacks_window", None)
     try:

@@ -16,6 +16,7 @@ PACK_FILE = "pack.json"
 LEDGER_FILE = "modpacks_ledger.json"
 TEMP_SUFFIX = ".modpacks-tmp"
 OLD_SUFFIX = ".modpacks-old"
+HOLD_SUFFIX = ".modpacks-hold"
 GAME_EXE = "A Township Tale.exe"
 DEFAULT_PORT = 1757
 MODES = ("off", "all", "servers")
@@ -33,6 +34,43 @@ class ConflictError(ModpacksError):
     def __init__(self, conflicts):
         super().__init__("; ".join(conflicts))
         self.conflicts = conflicts
+
+
+class Conflict(str):
+    def __new__(cls, text, kind, packs=(), loose=()):
+        conflict = super().__new__(cls, text)
+        conflict.kind = kind
+        conflict.packs = list(packs)
+        conflict.loose = list(loose)
+        return conflict
+
+
+def listed(names):
+    names = list(names)
+    if len(names) < 2:
+        return "".join(names)
+    return ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def left_out(conflicts):
+    return {(pack.lower(), name.lower()) for c in conflicts for pack, name in getattr(c, "packs", [])}
+
+
+def loose_in(conflicts):
+    found = {}
+    for conflict in conflicts:
+        for name in getattr(conflict, "loose", []):
+            if not is_launcher_mod(name):
+                found.setdefault(name.lower(), name)
+    return sorted(found.values(), key=str.lower)
+
+
+def describe_left_out(pairs):
+    by_file = {}
+    for pack, name in pairs:
+        by_file.setdefault(name.lower(), (name, []))[1].append(pack)
+    return ", ".join("%s from %s" % (name, listed(packs))
+                     for name, packs in sorted(by_file.values(), key=lambda v: v[0].lower()))
 
 
 def data_dir():
@@ -296,7 +334,7 @@ def loose_files(mods_dir):
 
 
 class Plan:
-    def __init__(self, game_dir, target, ledger_path=None, lookup=None):
+    def __init__(self, game_dir, target, ledger_path=None, lookup=None, leave_out=None):
         self.game_dir = game_dir
         self.target = target
         self.mods_dir = os.path.join(game_dir, "Mods")
@@ -312,6 +350,8 @@ class Plan:
         self.lookup = cached
         self.conflicts = []
         self.notes = []
+        self.leave_out = {(pack.lower(), name.lower()) for pack, name in leave_out or ()}
+        self.left_out = []
         self.packs = list_packs(game_dir)
         self.active = [p for p in self.packs if p.links(target, cached)]
         self._read_mods()
@@ -347,6 +387,7 @@ class Plan:
 
     def _want(self):
         self.wanted = {}
+        found = {}
         for pack in self.active:
             for name in pack.files():
                 if not pack.ticked(name):
@@ -355,22 +396,28 @@ class Plan:
                     self.notes.append("%s in pack %s is the launcher's own mod, so it was left out."
                                       % (name, pack.name))
                     continue
+                if (pack.name.lower(), name.lower()) in self.leave_out:
+                    self.left_out.append((pack.name, name))
+                    continue
                 path = os.path.join(pack.path, name)
                 try:
                     digest = sha256(path)
                 except OSError as error:
-                    self.conflicts.append("%s in pack %s can't be read (%s)" % (name, pack.name, _why(error)))
+                    self.conflicts.append(Conflict("%s in pack %s can't be read (%s)" % (name, pack.name, _why(error)),
+                                                   "unreadable", [(pack.name, name)]))
                     continue
-                low = name.lower()
-                have = self.wanted.get(low)
-                if have is None:
-                    self.wanted[low] = {"file": name, "source": path, "sha256": digest,
-                                        "pack": pack.name, "packs": [pack.name]}
-                elif have["sha256"] != digest:
-                    self.conflicts.append("%s is in packs %s and %s, and the two files are different"
-                                          % (name, have["pack"], pack.name))
-                else:
-                    have["packs"].append(pack.name)
+                found.setdefault(name.lower(), []).append((pack.name, name, path, digest))
+        for low, copies in found.items():
+            pack_name, name, path, digest = copies[0]
+            places = [(c[0], c[1]) for c in copies]
+            packs = [c[0] for c in copies]
+            if any(c[3] != digest for c in copies):
+                text = "%s is in packs %s, and the %s are different" % (
+                    name, listed(packs), "two files" if len(packs) == 2 else "files")
+                self.conflicts.append(Conflict(text, "packs", places))
+                continue
+            self.wanted[low] = {"file": name, "source": path, "sha256": digest, "pack": pack_name,
+                                "packs": packs, "copies": places}
         self.identical = []
         for low, item in sorted(self.wanted.items()):
             if low not in self.loose:
@@ -382,25 +429,29 @@ class Plan:
             if digest == item["sha256"]:
                 self.identical.append(low)
             else:
-                self.conflicts.append("%s from pack %s is also loose in Mods as a different file"
-                                      % (item["file"], item["pack"]))
+                self.conflicts.append(Conflict("%s from pack %s is also loose in Mods as a different file"
+                                               % (item["file"], item["pack"]), "loose", item["copies"],
+                                               [self.loose[low]]))
 
     def _check_names(self):
         loading = {}
         for low, name in self.loose.items():
-            loading[low] = (name, "loose in Mods", os.path.join(self.mods_dir, name))
+            loading[low] = (name, "loose in Mods", os.path.join(self.mods_dir, name), None)
         for low, item in self.wanted.items():
             if low not in loading:
-                loading[low] = (item["file"], "pack " + item["pack"], item["source"])
+                loading[low] = (item["file"], "pack " + item["pack"], item["source"], item["copies"])
         by_name = {}
-        for low, (name, where, path) in sorted(loading.items()):
+        for low, (name, where, path, copies) in sorted(loading.items()):
             info = mod_info(path)
             if info and info["name"]:
-                by_name.setdefault(info["name"].lower(), (info["name"], []))[1].append((name, where))
+                by_name.setdefault(info["name"].lower(), (info["name"], []))[1].append((name, where, copies))
         for title, places in by_name.values():
-            if len(places) > 1 and any(where.startswith("pack ") for _, where in places):
-                self.conflicts.append("%s would load twice: %s" % (
-                    title, ", ".join("%s (%s)" % place for place in places)))
+            if len(places) > 1 and any(copies for _, _, copies in places):
+                text = "%s would load twice: %s" % (
+                    title, ", ".join("%s (%s)" % (name, where) for name, where, _ in places))
+                packs = [pair for _, _, copies in places for pair in copies or []]
+                loose = [name for name, _, copies in places if copies is None]
+                self.conflicts.append(Conflict(text, "twice", packs, loose))
 
     def _changes(self):
         self.remove = []
@@ -492,6 +543,8 @@ def clean_leftovers(game_dir, mods_dir, hashes):
                 kept = _put_away(game_dir, path, hashes, name[:-len(OLD_SUFFIX)])
                 if kept:
                     moved.append(kept)
+            elif name.lower().endswith(HOLD_SUFFIX) and not os.path.lexists(path[:-len(HOLD_SUFFIX)]):
+                os.rename(path, path[:-len(HOLD_SUFFIX)])
         except OSError:
             pass
     return moved
@@ -511,7 +564,7 @@ def _entry(item):
     return {"file": item["file"], "sha256": item["sha256"], "pack": item["pack"]}
 
 
-def apply(game_dir, target, ledger_path=None, lookup=None, running=None):
+def apply(game_dir, target, ledger_path=None, lookup=None, running=None, leave_out=None):
     mods_dir = os.path.join(game_dir, "Mods")
     if (running or game_running)(game_dir):
         result = Result(None)
@@ -524,7 +577,7 @@ def apply(game_dir, target, ledger_path=None, lookup=None, running=None):
     path = ledger_path or ledger_file()
     hashes = pack_hashes(game_dir)
     leftovers = clean_leftovers(game_dir, mods_dir, hashes)
-    plan = Plan(game_dir, target, path, lookup)
+    plan = Plan(game_dir, target, path, lookup, leave_out)
     if plan.conflicts:
         raise ConflictError(plan.conflicts)
     result = Result(plan)
@@ -968,6 +1021,47 @@ def delete_loose(game_dir, name, ledger_path=None, running=None):
         raise ModpacksError("%s isn't a loose mod anymore. Click Refresh." % name)
     recycle(os.path.join(plan.mods_dir, found))
     return found
+
+
+def remove_loose(game_dir, names, ledger_path=None, running=None):
+    _closed(game_dir, running)
+    plan = Plan(game_dir, None, ledger_path or ledger_file())
+    picked = []
+    for name in names:
+        found = plan.loose.get(name.lower())
+        if found is not None and not is_launcher_mod(found) and found not in picked:
+            picked.append(found)
+    staged = []
+    try:
+        for name in picked:
+            live = os.path.join(plan.mods_dir, name)
+            os.rename(live, live + HOLD_SUFFIX)
+            staged.append(live)
+    except OSError as error:
+        for live in reversed(staged):
+            try:
+                os.rename(live + HOLD_SUFFIX, live)
+            except OSError:
+                pass
+        raise ModpacksError("%s couldn't be moved to the Recycle Bin (%s). Nothing was changed. If the game or "
+                            "another program has it open, close it and try again."
+                            % (os.path.basename(error.filename or "") or "A mod", _why(error)))
+    removed = []
+    for index, live in enumerate(staged):
+        try:
+            os.rename(live + HOLD_SUFFIX, live)
+            recycle(live)
+        except OSError as error:
+            for rest in staged[index + 1:]:
+                try:
+                    os.rename(rest + HOLD_SUFFIX, rest)
+                except OSError:
+                    pass
+            done = (" %s went to the Recycle Bin." % listed(removed)) if removed else " Nothing was changed."
+            raise ModpacksError("%s couldn't be moved to the Recycle Bin (%s).%s"
+                                % (os.path.basename(live), _why(error), done))
+        removed.append(os.path.basename(live))
+    return removed
 
 
 def add_loose(game_dir, paths, ask=None, ledger_path=None, running=None):

@@ -23,7 +23,8 @@ Click **📦 Modpacks** next to 🧪 Mods on the main window.
 - **Packs:** New, Rename, Delete (to the Recycle Bin), Import zip.
 - **The selected pack:** its mode, its servers, its mods with their real names, Open folder,
   Add files..., Export zip.
-- **Next launch:** exactly what will load for the server in the IP box. Problems show in red.
+- **Next launch:** exactly what will load for the server in the IP box. Problems show in red. If a loose
+  mod is in the way, **Remove loose copy** sends it to the Recycle Bin.
 - **Each mod in a pack:** **Move to loose** takes it out of the pack and makes it a loose mod. **Delete** sends
   it to the Recycle Bin. If the same mod is in other packs, you can delete it there too in the same step.
 - **Loose mods:** what's loose in `Mods`. Each one has **Add to pack...** and **Delete**.
@@ -60,8 +61,11 @@ A list is JSON in this shape. `name` and `servers` are optional:
 ## Good to know
 
 - If two packs have different files with the same name, a pack mod is also loose in `Mods` as a
-  different file, or the same mod would load twice, the game won't start until you fix it. A message
-  says what's wrong, and nothing in `Mods` is changed.
+  different file, or the same mod would load twice, Modpacks asks what to do before the game starts:
+  - **Remove and play** sends the loose files in the way to the Recycle Bin, then starts the game.
+    It only shows when a loose file is part of the problem.
+  - **Run anyway** starts the game without the clashing pack mods, this time only. Your loose mods stay.
+  - **Close** stops the launch and changes nothing.
 - If the game is already running, nothing changes and the launch goes ahead as usual.
 - If a file can't be changed, everything is put back the way it was and the launch stops.
 - A mod that no pack holds anymore is never deleted. It's kept in `Modpacks\_removed`. Mods you delete

@@ -475,9 +475,15 @@ class ModpacksWindow(tk.Toplevel):
             self._label(inner, "Couldn't work it out: %s" % error, fg=t.RED).pack(anchor="w", padx=10, pady=8)
             return
         for conflict in plan.conflicts:
-            self._label(inner, "✖ " + conflict, fg=t.RED, wraplength=440).pack(anchor="w", padx=10, pady=(4, 0))
+            row = tk.Frame(inner, bg=t.SURF)
+            row.pack(fill="x", padx=10, pady=(4, 0))
+            loose = engine.loose_in([conflict])
+            if loose:
+                self._tiny(row, "Remove loose copy", lambda n=loose: self.remove_conflict(n), "danger").pack(
+                    side="right", anchor="n")
+            self._label(row, "✖ " + conflict, fg=t.RED, wraplength=330 if loose else 440).pack(side="left", anchor="w")
         if plan.conflicts:
-            self._label(inner, "The game won't start until this is fixed.", fg=t.RED,
+            self._label(inner, "When the game starts, Modpacks asks what to do.", fg=t.RED,
                         font=("Segoe UI", 8)).pack(anchor="w", padx=10, pady=(0, 6))
         if not plan.active:
             self._label(inner, "No packs. Only your loose mods load.", fg=t.MUTED).pack(anchor="w", padx=10, pady=8)
@@ -828,6 +834,21 @@ class ModpacksWindow(tk.Toplevel):
         self.refresh()
         self.say("%s is in the Recycle Bin." % name)
 
+    def remove_conflict(self, names):
+        if not messagebox.askyesno("Remove loose copy", "Move %s from the Mods folder to the Recycle Bin? The pack's "
+                                   "mod loads instead." % engine.listed(names), parent=self):
+            return
+        try:
+            removed = engine.remove_loose(self.game_dir, names)
+        except (engine.ModpacksError, OSError) as error:
+            self.say(getattr(error, "strerror", None) or str(error), True)
+            return
+        self.refresh()
+        if removed:
+            self.say("%s %s in the Recycle Bin." % (engine.listed(removed), "is" if len(removed) == 1 else "are"))
+        else:
+            self.say("Nothing to remove anymore.")
+
     def add_loose(self):
         paths = filedialog.askopenfilenames(parent=self, title="Add loose mods",
                                             filetypes=[("Mods", "*.dll"), ("All files", "*.*")])
@@ -1062,6 +1083,70 @@ class LooseDialog(tk.Toplevel):
             self.error.configure(text=getattr(error, "strerror", None) or str(error))
             return
         self.result = (engine.Pack(pack.path), moved, created)
+        self.destroy()
+
+
+class ConflictDialog(tk.Toplevel):
+    def __init__(self, owner, conflicts, loose):
+        super().__init__(owner)
+        _chrome._start_hidden(self)
+        t = _theme
+        self.choice = "close"
+        self.title("Modpacks")
+        self.configure(bg=t.BG)
+        try:
+            if owner.winfo_viewable():
+                self.transient(owner)
+        except Exception:
+            pass
+        tk.Label(self, text="These mods clash, so the game can't start with all of them:", bg=t.BG, fg=t.PARCH,
+                 font=("Segoe UI", 10, "bold"), wraplength=480, justify="left").pack(anchor="w", padx=16, pady=(12, 6))
+        box = tk.Frame(self, bg=t.SURF, highlightbackground=t.BORDER, highlightthickness=1)
+        box.pack(fill="x", padx=16)
+        for conflict in conflicts:
+            tk.Label(box, text="✖ " + conflict, bg=t.SURF, fg=t.RED, font=("Segoe UI", 9), wraplength=460,
+                     justify="left", anchor="w").pack(anchor="w", padx=8, pady=3)
+        steps = []
+        if loose:
+            steps.append(("Remove and play", "Moves %s from the Mods folder to the Recycle Bin, then starts the game "
+                          "with your packs." % engine.listed(loose)))
+        steps.append(("Run anyway", "Starts the game without the clashing pack mods, this time only. Your loose "
+                      "mods stay as they are."))
+        steps.append(("Close", "Stops here. Nothing changes."))
+        for name, text in steps:
+            row = tk.Frame(self, bg=t.BG)
+            row.pack(fill="x", padx=16, pady=(8, 0))
+            tk.Label(row, text=name, bg=t.BG, fg=t.AMBER, font=("Segoe UI", 9, "bold"), width=15,
+                     anchor="w").pack(side="left", anchor="n")
+            tk.Label(row, text=text, bg=t.BG, fg=t.MUTED, font=("Segoe UI", 9), wraplength=350, justify="left",
+                     anchor="w").pack(side="left", fill="x")
+        row = tk.Frame(self, bg=t.BG)
+        row.pack(fill="x", padx=16, pady=14)
+        if loose:
+            _theme._btn(row, "Remove and play", lambda: self.pick("remove"), "primary", font=("Georgia", 10, "bold"),
+                        pady=6, padx=14).pack(side="left", padx=(0, 6))
+        _theme._btn(row, "Run anyway", lambda: self.pick("run"), "normal" if loose else "primary",
+                    font=("Georgia", 10, "bold"), pady=6, padx=14).pack(side="left")
+        _theme._btn(row, "Close", self.destroy, font=("Segoe UI", 9), pady=6, padx=10).pack(side="left", padx=6)
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+        self.bind("<Escape>", lambda e: self.destroy())
+        self.update_idletasks()
+        width, height = 520, self.winfo_reqheight()
+        try:
+            x = owner.winfo_rootx() + max(0, (owner.winfo_width() - width) // 2)
+            self.geometry("%dx%d+%d+%d" % (width, height, x, owner.winfo_rooty() + 60))
+        except Exception:
+            self.geometry("%dx%d" % (width, height))
+        _chrome._finish_dark_window(self)
+        self.lift()
+        try:
+            self.grab_set()
+            self.focus_force()
+        except tk.TclError:
+            pass
+
+    def pick(self, choice):
+        self.choice = choice
         self.destroy()
 
 

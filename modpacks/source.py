@@ -1,0 +1,311 @@
+import json
+import os
+import re
+import shutil
+import time
+from urllib.parse import urljoin, urlparse
+from urllib.request import Request, urlopen
+
+from . import engine
+
+USER_AGENT = "TavernLauncher-Modpacks/1.0"
+TIMEOUT = 20
+MAX_MANIFEST = 2 * 1024 * 1024
+MAX_FILES = 300
+HEX = re.compile(r"^[0-9A-Fa-f]{64}$")
+DOWNLOADS_DIR = "_downloads"
+SEEN_LIMIT = 400
+
+
+class SourceError(engine.ModpacksError):
+    pass
+
+
+def check_url(url):
+    parsed = urlparse(str(url).strip())
+    if parsed.scheme != "https" or not parsed.hostname:
+        raise SourceError("Update links must start with https://")
+    return parsed
+
+
+def fetch(url, limit):
+    check_url(url)
+    request = Request(url, headers={"User-Agent": USER_AGENT})
+    with urlopen(request, timeout=TIMEOUT) as response:
+        final = response.geturl()
+        data = response.read(limit + 1)
+    if len(data) > limit:
+        raise SourceError("%s is too big." % os.path.basename(urlparse(url).path) or url)
+    return final, data
+
+
+def host_of(url):
+    return (urlparse(url).hostname or "").lower()
+
+
+class Manifest:
+    def __init__(self, url, files, name, servers, skipped):
+        self.url = url
+        self.host = host_of(url)
+        self.files = files
+        self.name = name
+        self.servers = servers
+        self.skipped = skipped
+
+
+def read_manifest(url, fetcher=None):
+    check_url(url)
+    try:
+        final, data = (fetcher or fetch)(url, MAX_MANIFEST)
+    except SourceError:
+        raise
+    except Exception as error:
+        raise SourceError("Couldn't read the update link (%s)." % (getattr(error, "reason", None) or error))
+    final_parsed = urlparse(final)
+    if final_parsed.scheme != "https" or (final_parsed.hostname or "").lower() != host_of(url):
+        raise SourceError("The update link moved to another site, so it was refused.")
+    try:
+        manifest = json.loads(data.decode("utf-8-sig"))
+    except (ValueError, UnicodeDecodeError):
+        raise SourceError("The update link didn't return a mod list.")
+    entries = manifest.get("files") if isinstance(manifest, dict) else None
+    if not isinstance(entries, list):
+        raise SourceError("The update link didn't return a mod list.")
+    if len(entries) > MAX_FILES:
+        raise SourceError("The mod list is too long.")
+    files, skipped, seen = [], [], set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise SourceError("The mod list has an entry Modpacks can't read.")
+        name = entry.get("filename")
+        digest = entry.get("sha256")
+        link = entry.get("url")
+        if (not isinstance(name, str) or not engine.is_dll(name) or "/" in name or "\\" in name
+                or ":" in name or name in (".", "..") or engine.check_name(name.rsplit(".", 1)[0] or "x")):
+            raise SourceError("The mod list has an unsafe file name: %r" % (name,))
+        if not isinstance(digest, str) or not HEX.match(digest):
+            raise SourceError("The mod list has no valid SHA-256 for %s." % name)
+        if not isinstance(link, str):
+            raise SourceError("The mod list has no download link for %s." % name)
+        resolved = urljoin(final, link)
+        parsed = urlparse(resolved)
+        if parsed.scheme != "https" or (parsed.hostname or "").lower() != host_of(url):
+            raise SourceError("%s downloads from another site, so the list was refused." % name)
+        if name.lower() in seen:
+            raise SourceError("The mod list has %s twice." % name)
+        seen.add(name.lower())
+        if engine.is_launcher_mod(name):
+            skipped.append("%s (the launcher manages it)" % name)
+            continue
+        files.append({"filename": name, "sha256": digest.upper(), "url": resolved})
+    title = manifest.get("name") if isinstance(manifest.get("name"), str) else ""
+    servers = [s for s in engine._list(manifest.get("servers")) if isinstance(s, str) and s.strip()]
+    return Manifest(url, files, title.strip()[:60], servers, skipped)
+
+
+def source_state(pack):
+    data = pack.source if isinstance(pack.source, dict) else {}
+    files = data.get("files") if isinstance(data.get("files"), dict) else {}
+    return {"url": data.get("url") if isinstance(data.get("url"), str) else "",
+            "files": {k.lower(): str(v).upper() for k, v in files.items() if isinstance(k, str)},
+            "seen": [str(s).upper() for s in engine._list(data.get("seen"))],
+            "checked": data.get("checked") if isinstance(data.get("checked"), str) else ""}
+
+
+def changes(pack, manifest):
+    state = source_state(pack)
+    present = {n.lower(): n for n in pack.files()}
+    new, updated, removed, kept = [], [], [], []
+    listed = set()
+    for item in manifest.files:
+        low = item["filename"].lower()
+        listed.add(low)
+        if low not in present:
+            new.append(item)
+            continue
+        current = engine.sha256(os.path.join(pack.path, present[low]))
+        if current == item["sha256"]:
+            continue
+        recorded = state["files"].get(low)
+        if recorded is not None and recorded != current:
+            kept.append("%s (you changed it, so it wasn't updated)" % present[low])
+            continue
+        if recorded is None and state["url"]:
+            kept.append("%s (it's yours, not from the update link)" % present[low])
+            continue
+        updated.append(item)
+    for low, recorded in state["files"].items():
+        if low in listed or low not in present:
+            continue
+        if engine.sha256(os.path.join(pack.path, present[low])) == recorded:
+            removed.append(present[low])
+    return {"new": new, "updated": updated, "removed": removed, "kept": kept}
+
+
+def count(found):
+    return len(found["new"]) + len(found["updated"]) + len(found["removed"])
+
+
+def describe(found):
+    parts = []
+    for key, word in (("new", "new"), ("updated", "updated"), ("removed", "removed")):
+        if found[key]:
+            parts.append("%d %s" % (len(found[key]), word))
+    return ", ".join(parts) or "up to date"
+
+
+def _local_copy(game_dir, name, digest):
+    candidates = [os.path.join(game_dir, "Mods", name)]
+    for pack in engine.list_packs(game_dir):
+        candidates.append(os.path.join(pack.path, name))
+    for path in candidates:
+        try:
+            if os.path.isfile(path) and engine.sha256(path) == digest:
+                return path
+        except OSError:
+            continue
+    return None
+
+
+def _download(item, target, game_dir, fetcher):
+    local = _local_copy(game_dir, item["filename"], item["sha256"])
+    if local:
+        shutil.copyfile(local, target)
+    else:
+        try:
+            final, data = (fetcher or fetch)(item["url"], engine.MAX_ENTRY)
+        except SourceError:
+            raise
+        except Exception as error:
+            raise SourceError("%s couldn't be downloaded (%s)." % (
+                item["filename"], getattr(error, "reason", None) or error))
+        parsed = urlparse(final)
+        if parsed.scheme != "https" or (parsed.hostname or "").lower() != host_of(item["url"]):
+            raise SourceError("%s moved to another site, so it was refused." % item["filename"])
+        with open(target, "wb") as f:
+            f.write(data)
+    if engine.sha256(target) != item["sha256"]:
+        raise SourceError("%s didn't match its SHA-256, so nothing was changed." % item["filename"])
+
+
+def sync(game_dir, pack, manifest, fetcher=None):
+    found = changes(pack, manifest)
+    work = engine.unique_path(os.path.join(engine.packs_dir(game_dir), DOWNLOADS_DIR), pack.name)
+    os.makedirs(work)
+    try:
+        for item in found["new"] + found["updated"]:
+            _download(item, os.path.join(work, item["filename"]), game_dir, fetcher)
+        state = source_state(pack)
+        present = {n.lower(): n for n in pack.files()}
+        seen = list(state["seen"])
+        for item in found["updated"]:
+            old = os.path.join(pack.path, present[item["filename"].lower()])
+            seen.append(engine.sha256(old))
+        for name in found["removed"]:
+            seen.append(engine.sha256(os.path.join(pack.path, name)))
+        for item in found["new"] + found["updated"]:
+            low = item["filename"].lower()
+            target = os.path.join(pack.path, present.get(low, item["filename"]))
+            os.replace(os.path.join(work, item["filename"]), target)
+            if engine.looks_server_only(item["filename"]) and low not in present:
+                pack.on.discard(low)
+        for name in found["removed"]:
+            os.remove(os.path.join(pack.path, name))
+        files = {}
+        for item in manifest.files:
+            path = os.path.join(pack.path, item["filename"])
+            if os.path.isfile(path) and engine.sha256(path) == item["sha256"]:
+                files[item["filename"].lower()] = item["sha256"]
+        for item in manifest.files:
+            low = item["filename"].lower()
+            if low not in files and low in state["files"]:
+                files[low] = state["files"][low]
+        seen.extend(item["sha256"] for item in manifest.files)
+        pack.source = {"url": manifest.url, "files": files, "seen": _trim(seen),
+                       "checked": time.strftime("%Y-%m-%d %H:%M")}
+        pack.save()
+    except OSError as error:
+        raise SourceError("The update couldn't be saved (%s)." % engine._why(error))
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+        try:
+            os.rmdir(os.path.dirname(work))
+        except OSError:
+            pass
+    return found
+
+
+def _trim(seen):
+    unique = list(dict.fromkeys(seen))
+    return unique[-SEEN_LIMIT:]
+
+
+def suggest_link(manifest, known_servers):
+    wanted = []
+    for entry in manifest.servers:
+        host, _, port = entry.strip().rpartition(":")
+        if not host or not port.isdigit():
+            host, port = entry.strip(), str(engine.DEFAULT_PORT)
+        wanted.append(engine.server_key(host, port))
+    if not wanted:
+        wanted = [engine.server_key(manifest.host, engine.DEFAULT_PORT)]
+    links = []
+    for server in known_servers:
+        key = engine.server_key(server["host"], server["port"])
+        if key in wanted and all(engine.server_key(s["host"], s["port"]) != key for s in links):
+            links.append(server)
+    return links
+
+
+def subscribe(game_dir, url, name, known_servers, fetcher=None, manifest=None):
+    manifest = manifest or read_manifest(url, fetcher)
+    pack = engine.create_pack(game_dir, name, "off")
+    try:
+        links = suggest_link(manifest, known_servers)
+        if links:
+            pack.mode = "servers"
+            pack.servers = [{"name": s["name"], "host": s["host"], "port": str(engine.parse_port(s["port"]))}
+                            for s in links]
+        pack.source = {"url": manifest.url, "files": {}, "seen": [], "checked": ""}
+        pack.save()
+        found = sync(game_dir, pack, manifest, fetcher)
+    except Exception:
+        shutil.rmtree(pack.path, ignore_errors=True)
+        raise
+    return engine.find_pack(game_dir, pack.name), found, manifest
+
+
+def linked_packs(game_dir):
+    return [p for p in engine.list_packs(game_dir) if source_state(p)["url"]]
+
+
+def check_all(game_dir, fetcher=None):
+    report = []
+    for pack in linked_packs(game_dir):
+        url = source_state(pack)["url"]
+        try:
+            manifest = read_manifest(url, fetcher)
+            report.append((pack.name, manifest, changes(pack, manifest), None))
+        except Exception as error:
+            report.append((pack.name, None, None, str(error)))
+    return report
+
+
+def update_all(game_dir, report, fetcher=None):
+    done = []
+    for name, manifest, found, error in report:
+        if error or manifest is None or not count(found):
+            continue
+        pack = engine.find_pack(game_dir, name)
+        if pack is None:
+            continue
+        try:
+            done.append((name, sync(game_dir, pack, manifest, fetcher), None))
+        except Exception as error:
+            done.append((name, None, str(error)))
+    return done
+
+
+def unlink(pack):
+    pack.source = {}
+    pack.save()

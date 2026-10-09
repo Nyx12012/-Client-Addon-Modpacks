@@ -174,6 +174,7 @@ class Pack:
                                  "host": str(entry["host"]).strip(), "port": str(key[1])})
         self.off = {n.lower() for n in _list(data.get("off")) if isinstance(n, str)}
         self.on = {n.lower() for n in _list(data.get("on")) if isinstance(n, str)}
+        self.source = data.get("source") if isinstance(data.get("source"), dict) else {}
 
     def files(self):
         try:
@@ -209,6 +210,11 @@ class Pack:
         return False
 
     def describe(self):
+        text = self._mode_text()
+        host = self.link_host()
+        return text + ("  ·  updates from " + host if host else "")
+
+    def _mode_text(self):
         if self.mode == "all":
             return "On everywhere"
         if self.mode == "servers":
@@ -218,8 +224,15 @@ class Pack:
         return "Off"
 
     def state(self):
-        return {"format": 1, "mode": self.mode, "servers": self.servers,
-                "off": sorted(self.off), "on": sorted(self.on)}
+        state = {"format": 1, "mode": self.mode, "servers": self.servers,
+                 "off": sorted(self.off), "on": sorted(self.on)}
+        if self.source:
+            state["source"] = self.source
+        return state
+
+    def link_host(self):
+        url = self.source.get("url") if isinstance(self.source.get("url"), str) else ""
+        return url.split("/")[2].split(":")[0].lower() if url.count("/") >= 2 else ""
 
     def save(self):
         write_json(os.path.join(self.path, PACK_FILE), self.state())
@@ -434,6 +447,7 @@ def pack_hashes(game_dir):
                 found.add(sha256(os.path.join(pack.path, name)))
             except OSError:
                 pass
+        found.update(str(s).upper() for s in _list(pack.source.get("seen")))
     return found
 
 

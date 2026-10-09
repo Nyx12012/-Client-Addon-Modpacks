@@ -7,8 +7,9 @@ from tkinter import messagebox
 
 import tavern_shared.theme as _theme
 
-from . import engine, window
+from . import engine, source, window
 
+CHECK_DELAY_MS = 3000
 MODS_BUTTON = "\U0001F9EA Mods"
 AFTER_TEXTS = ("\U0001F4C1 Mods Folder", "☑ Toggle Mods")
 BUTTON_TEXT = "\U0001F4E6 Modpacks"
@@ -155,6 +156,57 @@ def _add_button(anchor):
         button = _theme._btn(anchor.master, BUTTON_TEXT, lambda: _open(root),
                              font=("Segoe UI", 9), pady=5, padx=10)
         button.pack(side="left", padx=(6, 0), after=after)
+        if not getattr(root, "_modpacks_checked", False):
+            root._modpacks_checked = True
+            root.after(CHECK_DELAY_MS, lambda: _startup_check(root))
+    except Exception:
+        pass
+
+
+def _startup_check(root):
+    try:
+        exe = root.v_exe.get().strip()
+    except Exception:
+        return
+    game_dir = os.path.dirname(exe)
+    if not exe or not os.path.isdir(os.path.join(game_dir, "Mods")) or not source.linked_packs(game_dir):
+        return
+    window.background(root, lambda: source.check_all(game_dir), lambda report, error: _checked(root, game_dir, report, error))
+
+
+def _checked(root, game_dir, report, error):
+    if error or not report:
+        return
+    waiting = []
+    for name, manifest, found, problem in report:
+        if problem:
+            _log("Modpacks: couldn't check %s for updates (%s)" % (name, problem), "warn")
+        elif source.count(found):
+            waiting.append("%s: %s" % (name, source.describe(found)))
+    if not waiting:
+        if not any(r[3] for r in report):
+            _log("Modpacks: linked packs are up to date", "dim")
+        return
+    if not messagebox.askyesno("Modpack updates", "Updates are ready:\n\n" + "\n".join(waiting)
+                               + "\n\nDownload them now?", parent=root):
+        _log("Modpacks: updates skipped for now (" + "; ".join(waiting) + ")", "warn")
+        return
+    window.background(root, lambda: source.update_all(game_dir, report), lambda done, error: _updated(root, done, error))
+
+
+def _updated(root, done, error):
+    if error:
+        _log("Modpacks: updates failed (%s)" % error, "err")
+        return
+    for name, found, problem in done or []:
+        if problem:
+            _log("Modpacks: %s wasn't updated (%s)" % (name, problem), "err")
+        else:
+            _log("Modpacks: updated %s (%s)" % (name, source.describe(found)), "ok")
+    window_open = getattr(root, "_modpacks_window", None)
+    try:
+        if window_open is not None and window_open.winfo_exists():
+            window_open.refresh()
     except Exception:
         pass
 

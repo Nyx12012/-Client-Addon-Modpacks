@@ -26,6 +26,31 @@ Click **📦 Modpacks** next to 🧪 Mods on the main window.
 - **Loose mods:** what's loose in `Mods`. **Make a pack from these...** moves the mods you pick into a
   pack. New packs start On everywhere, so nothing changes until you change the mode.
 
+## Packs from a link
+
+Some servers publish their client mods as a list, like Sheikah Sanctuary's
+`https://att.aservertown.fans/manifest.json`. Click **From a link...**, paste the link, and Modpacks makes a pack
+that downloads those mods and keeps them up to date.
+
+- If the link's site is one of your saved or recent servers, the pack loads only on that server.
+- When the launcher opens, Modpacks checks every linked pack and asks before downloading anything.
+- Every file must come over https from the same site as the list and match its SHA-256, or nothing changes.
+- Mods you add to a linked pack yourself, or files you change, are never overwritten.
+- **Check now** and **Remove link** are on the pack. If you used a separate updater addon for the same mods,
+  turn it off so the mods aren't installed twice.
+
+A list is JSON in this shape. `name` and `servers` are optional:
+
+```json
+{
+  "name": "My Server",
+  "servers": ["myserver.com:1757"],
+  "files": [
+    {"filename": "MyMod.dll", "sha256": "<64 hex characters>", "url": "https://myserver.com/MyMod.dll"}
+  ]
+}
+```
+
 ## Good to know
 
 - If two packs have different files with the same name, a pack mod is also loose in `Mods` as a

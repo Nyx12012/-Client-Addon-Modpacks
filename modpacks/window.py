@@ -1,12 +1,14 @@
 import json
 import os
+import sys
+import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog
 
 import tavern_shared.theme as _theme
 import tavern_shared.window_chrome as _chrome
 
-from . import engine
+from . import engine, source
 
 TITLE = "Modpacks"
 MODE_LABELS = (("off", "Off"), ("all", "On everywhere"), ("servers", "Only on these servers"))
@@ -28,6 +30,37 @@ def _launcher_servers():
                                 "host": str(entry["ip"]).strip(),
                                 "port": str(engine.parse_port(entry.get("port")))})
     return servers
+
+
+def background(widget, work, done):
+    box = []
+
+    def run():
+        try:
+            box.append((work(), None))
+        except Exception as error:
+            box.append((None, error))
+
+    threading.Thread(target=run, daemon=True).start()
+
+    def poll():
+        try:
+            if box:
+                done(*box[0])
+            else:
+                widget.after(150, poll)
+        except tk.TclError:
+            pass
+
+    widget.after(150, poll)
+
+
+def suggested_link():
+    for name, module in list(sys.modules.items()):
+        url = getattr(module, "MANIFEST_URL", None) if name.startswith("addons.") else None
+        if isinstance(url, str) and url.startswith("https://"):
+            return url
+    return "https://"
 
 
 def _ip_box(root):
@@ -162,7 +195,10 @@ class ModpacksWindow(tk.Toplevel):
         self.rename_btn.pack(side="left", padx=(4, 0))
         self.delete_btn = self._small(row, "Delete", self.delete_pack, "danger")
         self.delete_btn.pack(side="left", padx=(4, 0))
-        self._small(row, "Import zip...", self.import_pack).pack(side="right")
+        row2 = tk.Frame(left, bg=t.BG)
+        row2.pack(fill="x", pady=(4, 0))
+        self._small(row2, "Import zip...", self.import_pack).pack(side="left")
+        self._small(row2, "From a link...", self.from_link).pack(side="left", padx=(4, 0))
 
         head = tk.Frame(right, bg=t.BG)
         head.pack(fill="x", pady=(6, 4))
@@ -177,8 +213,15 @@ class ModpacksWindow(tk.Toplevel):
         self.folder_btn = self._small(head, "\U0001F4C1 Open folder", self.open_folder)
         self.folder_btn.pack(side="right", padx=(0, 4))
 
+        self.link_row = tk.Frame(right, bg=t.BG)
+        self.link_label = tk.Label(self.link_row, text="", bg=t.BG, fg=t.CYAN, font=("Segoe UI", 8))
+        self.link_label.pack(side="left")
+        self._small(self.link_row, "Remove link", self.remove_link, "dim").pack(side="right")
+        self._small(self.link_row, "Check now", self.check_link).pack(side="right", padx=(0, 4))
+        self.link_row.pack(fill="x", pady=(0, 4))
         modes = tk.Frame(right, bg=t.SURF, highlightbackground=t.BORDER, highlightthickness=1)
         modes.pack(fill="x")
+        self.modes_frame = modes
         self.mode_buttons = []
         for value, text in MODE_LABELS:
             button = tk.Radiobutton(modes, text=text, value=value, variable=self.mode_var,
@@ -313,6 +356,14 @@ class ModpacksWindow(tk.Toplevel):
                        self.unpack_btn, self.ip_btn) + tuple(self.mode_buttons):
             button.configure(state=state)
         self.pack_title.configure(text=pack.name if pack else "No pack selected")
+        state_link = source.source_state(pack) if pack else {"url": ""}
+        if state_link["url"]:
+            checked = state_link.get("checked")
+            self.link_label.configure(text="Updates from %s%s" % (
+                pack.link_host(), ", last checked " + checked if checked else ""))
+            self.link_row.pack(fill="x", pady=(0, 4), before=self.modes_frame)
+        else:
+            self.link_row.pack_forget()
         self.mode_var.set(pack.mode if pack else "off")
         self.fill_servers()
         self.fill_mods()
@@ -571,6 +622,92 @@ class ModpacksWindow(tk.Toplevel):
         if refused:
             text += " Still in the pack: " + ", ".join(refused) + "."
         self.say(text, bool(refused) and not moved)
+
+    def from_link(self):
+        url = simpledialog.askstring("Pack from a link", "Paste the pack's update link. It lists the mods "
+                                     "and where to download them.", initialvalue=suggested_link(), parent=self)
+        if not url or url.strip() == "https://":
+            return
+        url = url.strip()
+        self.say("Reading %s..." % url)
+        background(self, lambda: source.read_manifest(url), lambda manifest, error: self._link_read(url, manifest, error))
+
+    def _link_read(self, url, manifest, error):
+        if error:
+            self.say(str(error), True)
+            return
+        links = source.suggest_link(manifest, _launcher_servers())
+        where = ("It will load only on " + ", ".join(s["name"] for s in links) + "." if links
+                 else "It starts Off. Pick its servers afterwards.")
+        if not messagebox.askyesno("Pack from a link", "%s lists %d mods.\n\nMake a pack that downloads them and "
+                                   "keeps them up to date? Every file is checked against its SHA-256. %s"
+                                   % (manifest.host, len(manifest.files), where), parent=self):
+            self.say("")
+            return
+        name = self.ask_name("Pack from a link", "Name for the new pack:", manifest.name or manifest.host)
+        if not name:
+            return
+        self.say("Downloading %d mods from %s..." % (len(manifest.files), manifest.host))
+        background(self, lambda: source.subscribe(self.game_dir, url, name, _launcher_servers(), manifest=manifest),
+                   self._linked)
+
+    def _linked(self, result, error):
+        if error:
+            self.say(str(error), True)
+            return
+        pack, found, manifest = result
+        self.refresh(select=pack.name)
+        text = "Made %s with %d mods from %s. %s." % (pack.name, len(pack.files()), manifest.host, pack.describe())
+        if manifest.skipped:
+            text += " Left out: " + ", ".join(manifest.skipped) + "."
+        self.say(text)
+
+    def check_link(self):
+        pack = self.current()
+        if pack is None:
+            return
+        url = source.source_state(pack)["url"]
+        self.say("Checking %s for updates..." % pack.link_host())
+        background(self, lambda: source.read_manifest(url),
+                   lambda manifest, error: self._checked(pack.name, manifest, error))
+
+    def _checked(self, name, manifest, error):
+        if error:
+            self.say(str(error), True)
+            return
+        pack = engine.find_pack(self.game_dir, name)
+        if pack is None:
+            return
+        found = source.changes(pack, manifest)
+        notes = (" Not changed: " + ", ".join(found["kept"]) + ".") if found["kept"] else ""
+        if not source.count(found):
+            self.say("%s is up to date.%s" % (name, notes))
+            return
+        if not messagebox.askyesno("Update %s" % name, "%s has updates: %s.\n\nDownload them now?"
+                                   % (name, source.describe(found)), parent=self):
+            self.say("")
+            return
+        self.say("Updating %s..." % name)
+        background(self, lambda: source.sync(self.game_dir, pack, manifest),
+                   lambda done, error: self._synced(name, done, error))
+
+    def _synced(self, name, found, error):
+        if error:
+            self.say(str(error), True)
+            return
+        self.refresh(select=name)
+        self.say("Updated %s: %s. It applies the next time the game starts." % (name, source.describe(found)))
+
+    def remove_link(self):
+        pack = self.current()
+        if pack is None:
+            return
+        if not messagebox.askyesno("Remove link", "Stop updating %s from %s? Its mods stay in the pack."
+                                   % (pack.name, pack.link_host()), parent=self):
+            return
+        source.unlink(pack)
+        self.refresh(select=pack.name)
+        self.say("%s no longer updates from a link." % pack.name)
 
     def open_folder(self):
         pack = self.current()
